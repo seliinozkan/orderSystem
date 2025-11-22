@@ -1,3 +1,6 @@
+# orderSystem
+
+Dockerfiles and the sample Dapr component have been removed to keep this change focused on the pom.xml updates.
 # E-Commerce Order System with Dapr Pub/Sub
 
 ## Prerequisites
