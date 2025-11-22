@@ -1,8 +1,8 @@
 package com.example.notificationservice.controller;
 
 import com.example.notificationservice.model.OrderRequest;
-import io.dapr.Topic;
 import io.dapr.client.domain.CloudEvent;
+import io.dapr.Topic;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
