@@ -2,52 +2,137 @@
 
 This repository contains the source code and infrastructure configuration for an event-driven microservices architecture using **Java Spring Boot**, **Dapr**, and **Azure Container Apps (ACA)**.
 
-The system demonstrates a decoupled Pub/Sub pattern using **Redis** as the message broker, emphasizing resilience and portability in a cloud-native environment.
+The system demonstrates a decoupled Pub/Sub pattern using a **Self-Hosted Redis** container as the message broker to bypass Azure managed resource policy restrictions.
+
+---
 
 ## 🏗️ System Architecture
 
-
+The architecture follows the **Loose Coupling** principle. Services communicate asynchronously via Dapr Pub/Sub.
 
 ### Core Components
-
 | Component | Type | Description |
 | :--- | :--- | :--- |
-| **Order Service** | `Publisher` | Spring Boot microservice that ingests order requests and publishes events via Dapr sidecar. |
-| **Notification Service** | `Subscriber` | Spring Boot microservice that subscribes to order events and handles downstream processing. |
-| **Redis Broker** | `Infrastructure` | A containerized Redis instance serving as the state store and message bus for Dapr. |
-| **Dapr Sidecars** | `Middleware` | Manages distributed system concerns such as service discovery, retries, and message delivery. |
+| **Order Service** | `Publisher` | Accepts HTTP requests and publishes events to `orders` topic. |
+| **Notification Service** | `Subscriber` | Listens to `orders` topic and logs the event payload. |
+| **Redis Broker** | `Infrastructure` | A containerized Redis instance (Self-Hosted) serving as the message bus. |
+| **Dapr Sidecars** | `Middleware` | Manages connectivity, retries, and abstraction. |
 
-## 📐 Architectural Decisions
+---
 
-### 1. Data Plane Strategy: Self-Hosted Redis
-Instead of relying on external managed services, the architecture utilizes a **self-hosted Redis container** running within the Container Apps Environment.
-* **Reasoning:** This approach ensures complete network isolation (Internal Ingress), reduces latency by keeping traffic within the same environment, and provides a cost-effective solution for development/test environments.
-* **Configuration:** The Redis instance runs on TCP port `6379` and is not exposed to the public internet.
+##  Deployment & Run Instructions
 
-### 2. Runtime & Security
-* **Base Images:** The application containers are built on top of **`eclipse-temurin:17-jre`**. This decision was made to leverage the security patches and long-term support (LTS) provided by the Eclipse Foundation, replacing legacy OpenJDK images.
-* **Executable Generation:** The build process explicitly enforces the `repackage` goal to ensure robust JAR execution within the container runtime.
+This section details how to build, deploy, and run the complete system on Azure.
 
-## 🚀 Technology Stack
+### 1. Prerequisites
+* Azure Subscription
+* Azure CLI installed and logged in (`az login`)
+* Docker installed locally (optional, for local testing)
 
-* **Platform:** Azure Container Apps
-* **Application Runtime:** Dapr (Distributed Application Runtime)
-* **Languages:** Java 17
-* **Framework:** Spring Boot 3.x
-* **Build Tool:** Maven
-* **CI/CD & Registry:** Azure Container Registry (ACR)
+## Environment Setup
+First, create the necessary resource group and Azure Container Registry (ACR).
 
-## ⚙️ Deployment Configuration
+```bash
+# Set Variables
+RG="order-rg"
+LOC="eastus"
+ACR_NAME="selinacr23"
+ENV_NAME="selin-env"
 
-The deployment consists of three primary container apps configured with Dapr sidecars.
+# Create Resource Group & Registry
+az group create --name $RG --location $LOC
+az acr create --resource-group $RG --name $ACR_NAME --sku Basic --admin-enabled true
+```
 
-### Dapr Component Configuration (`pubsub.redis`)
-The system uses a `pubsub.redis` component configured to communicate with the internal Redis container:
+## Build & Push Images (Image Details)
+Build the Docker images for both microservices and the Redis infrastructure.
 
-```yaml
-componentType: pubsub.redis
-metadata:
-  - name: redisHost
-    value: "redis-app:6379"
-  - name: enableTLS
-    value: "false"
+```bash
+
+# Build Order Service
+cd order-service
+az acr build --registry $ACR_NAME --image order-service:v1 .
+
+# Build Notification Service
+cd ../notification-service
+az acr build --registry $ACR_NAME --image notification-service:v1 .
+
+# Build Redis (Custom Image)
+# (Ensure you have a Dockerfile with 'FROM redis:alpine' in infrastructure folder or root)
+cd ../infrastructure
+az acr build --registry $ACR_NAME --image my-redis:v1 .
+```
+## Deploy Infrastructure (Redis)
+Deploy the self-hosted Redis container to serve as the message broker.
+
+```bash
+# Create Container App Environment
+az containerapp env create --name $ENV_NAME --resource-group $RG --location $LOC
+
+# Deploy Redis Container
+az containerapp create \
+  --name redis-app \
+  --resource-group $RG \
+  --environment $ENV_NAME \
+  --image $ACR_NAME.azurecr.io/my-redis:v1 \
+  --registry-server $ACR_NAME.azurecr.io \
+  --ingress internal --target-port 6379 --transport tcp
+```
+
+##  Configure Dapr
+Apply the Dapr component configuration to connect to the internal Redis service.
+
+```bash
+# Deploy Dapr Component
+az containerapp env dapr-component set \
+  --name $ENV_NAME --resource-group $RG \
+  --dapr-component-name order-pubsub \
+  --yaml ./components/order-pubsub.yaml
+```
+
+## Deploy Microservices
+Deploy the publisher and subscriber services with Dapr enabled.
+
+```bash
+# Deploy Order Service (Public Endpoint)
+az containerapp create \
+  --name order-service \
+  --resource-group $RG \
+  --environment $ENV_NAME \
+  --image $ACR_NAME.azurecr.io/order-service:v1 \
+  --registry-server $ACR_NAME.azurecr.io \
+  --ingress external --target-port 8080 \
+  --enable-dapr --dapr-app-id order-service --dapr-app-port 8080
+
+# Deploy Notification Service (Internal)
+az containerapp create \
+  --name notification-service \
+  --resource-group $RG \
+  --environment $ENV_NAME \
+  --image $ACR_NAME.azurecr.io/notification-service:v1 \
+  --registry-server $ACR_NAME.azurecr.io \
+  --ingress internal --target-port 8080 \
+  --enable-dapr --dapr-app-id notification-service --dapr-app-port 8080
+```
+
+## 🧪 Test
+
+To verify the end-to-end flow, you need to send an HTTP request to the public **Order Service** endpoint and verify that the message is consumed by the internal **Notification Service**.
+
+Send an Order Request
+Use the following `curl` command to publish a new order event.
+*(Replace `<ORDER_SERVICE_URL>` with the **Application Url** found in the Azure Portal for `order-service`)*.
+
+```bash
+curl -X POST https://<ORDER_SERVICE_URL>/create-order \
+-H "Content-Type: application/json" \
+-d '{"product": "La mer The Moisturizing Cream", "quantity": 1}'
+```
+
+## Configuration
+
+Port: All Java services run on port 8080.
+
+Java Version: Java 17 (Eclipse Temurin).
+
+Dapr Protocol: HTTP.
